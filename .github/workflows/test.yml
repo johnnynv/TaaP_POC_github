@@ -1,0 +1,269 @@
+name: TaaP POC Test Suite
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    # Run tests daily at 2 AM UTC
+    - cron: '0 2 * * *'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: [3.8, 3.9, '3.10', '3.11']
+        test-suite: [api, container, database, config, network, security, performance]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run ${{ matrix.test-suite }} tests
+      run: |
+        case "${{ matrix.test-suite }}" in
+          "api")
+            pytest -m api --cov=src --cov-report=xml --junitxml=junit.xml
+            ;;
+          "container")
+            pytest -m container --cov=src --cov-report=xml --junitxml=junit.xml
+            ;;
+          "database")
+            pytest -m database --cov=src --cov-report=xml --junitxml=junit.xml
+            ;;
+          "config")
+            pytest -m unit --cov=src --cov-report=xml --junitxml=junit.xml
+            ;;
+          "network")
+            pytest -m network --cov=src --cov-report=xml --junitxml=junit.xml
+            ;;
+          "security")
+            pytest -m security --cov=src --cov-report=xml --junitxml=junit.xml
+            ;;
+          "performance")
+            pytest -m performance --cov=src --cov-report=xml --junitxml=junit.xml
+            ;;
+          *)
+            pytest --cov=src --cov-report=xml --junitxml=junit.xml
+            ;;
+        esac
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: ${{ matrix.test-suite }}
+        name: codecov-${{ matrix.python-version }}-${{ matrix.test-suite }}
+
+    - name: Upload test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-results-${{ matrix.python-version }}-${{ matrix.test-suite }}
+        path: |
+          junit.xml
+          coverage.xml
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install linting dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install flake8 black mypy
+
+    - name: Run flake8
+      run: flake8 src tests --max-line-length=100
+
+    - name: Run black check
+      run: black --check src tests
+
+    - name: Run mypy
+      run: mypy src --ignore-missing-imports
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Build Docker image
+      run: docker build -t taap-poc-github .
+
+    - name: Run tests in Docker
+      run: |
+        docker run --rm \
+          -v ${{ github.workspace }}/reports:/app/reports \
+          taap-poc-github \
+          pytest --cov=src --html=reports/report.html --self-contained-html
+
+    - name: Upload Docker test reports
+      uses: actions/upload-artifact@v3
+      with:
+        name: docker-test-reports
+        path: reports/
+
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install security tools
+      run: |
+        python -m pip install --upgrade pip
+        pip install safety bandit
+        pip install -r requirements.txt
+
+    - name: Run safety check
+      run: safety check
+
+    - name: Run bandit security scan
+      run: bandit -r src/
+
+    - name: Run security tests
+      run: pytest -m security -v
+
+  performance:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run performance tests
+      run: pytest -m performance --benchmark-json=benchmark.json
+
+    - name: Upload benchmark results
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-results
+        path: benchmark.json
+
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:6.2
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      postgres:
+        image: postgres:13
+        env:
+          POSTGRES_DB: taap_test
+          POSTGRES_USER: taap_user
+          POSTGRES_PASSWORD: test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run integration tests
+      env:
+        DB_HOST: localhost
+        DB_PORT: 5432
+        DB_NAME: taap_test
+        DB_USER: taap_user
+        DB_PASSWORD: test_password
+        REDIS_HOST: localhost
+        REDIS_PORT: 6379
+      run: pytest -m integration --cov=src
+
+  release:
+    needs: [test, lint, docker, security-scan]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Generate test report
+      run: |
+        echo "# TaaP POC Test Results" > TEST_RESULTS.md
+        echo "" >> TEST_RESULTS.md
+        echo "All tests passed successfully!" >> TEST_RESULTS.md
+        echo "- API Tests: ✅" >> TEST_RESULTS.md
+        echo "- Container Tests: ✅" >> TEST_RESULTS.md
+        echo "- Database Tests: ✅" >> TEST_RESULTS.md
+        echo "- Configuration Tests: ✅" >> TEST_RESULTS.md
+        echo "- Network Tests: ✅" >> TEST_RESULTS.md
+        echo "- Security Tests: ✅" >> TEST_RESULTS.md
+        echo "- Performance Tests: ✅" >> TEST_RESULTS.md
+
+    - name: Create Release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: v${{ github.run_number }}
+        release_name: Release v${{ github.run_number }}
+        body_path: TEST_RESULTS.md
+        draft: false
+        prerelease: false 
